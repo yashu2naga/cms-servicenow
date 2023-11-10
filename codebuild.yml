@@ -1,0 +1,260 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+              Creates CICD services (CodePipeline, CodeBuild, etc.) for CSA CMR resources deployment.
+Parameters:
+  Env:
+    Type: String
+    Default: np
+    Description:
+      Enter Environment Name.
+  UAI:
+    Description: UAI of the application
+    Type: String
+  AppKms:
+    Description: Application Team's KMS Key ARN used to encrypt and decrypt data
+    Type: String
+    Default: arn:aws-us-gov:kms:us-gov-east-1:231648331929:key/44b6fecf-3f55-4225-b64b-7f2f90b46c75
+  BuildComputeSize:
+    Type: String
+    AllowedValues: [Small, Medium, Large]
+    Default: Small
+    Description: CodeBuild Compute Instance Size (Small, Medium, Large) - Small is default.
+    ConstraintDescription: Parameter 'BuildComputeSize' must be one of the following values - [Small, Medium, Large]
+  BuildImage:
+    Type: String
+    AllowedValues: [ubuntu5.0, ubuntu4.0, ubuntu3.0, al2-x86-3.0, al2-aarch64-2.0]
+    Default: ubuntu5.0
+    Description: CodeBuild Docker Image (ubuntu5.0, ubuntu4.0, ubuntu3.0, al2-x86-3.0, al2-aarch64-2.0) - ubuntu5.0 is default.
+    ConstraintDescription: Parameter 'BuildImage' must be one of the following values - [ubuntu5.0, ubuntu4.0, ubuntu3.0, al2-x86-3.0, al2-aarch64-2.0]
+  BuildTimeoutInMinutes:
+    Type: Number
+    Default: 15
+    Description: Timeout in minutes for the CodeBuild project.
+  BuildVPC:
+    Type: AWS::EC2::VPC::Id
+    Default: vpc-07fe810867f40e8b8
+    Description: VPC where CodeBuild jobs run.
+  CodeBuildServiceRoleName:
+    Type: String
+    Default: cms-spares-codebuild
+    Description: IAM Role Name used by the CodeBuild Service.
+  BranchName:
+    Type: String
+    Default: "dev"
+    Description: Name of the branch in your Order management Github Repository to trigger deployments on a pr/merge into this branch.
+  GithubURL:
+    Type: String
+    Default: https://github.build.ge.com/CMS-Spares/cms-spares-order-management
+    AllowedPattern: https:\/\/github.build.ge.com\/[a-zA-Z0-9-]*\/[a-zA-Z0-9-]*(?<!.git)
+    Description: Https URL of the Order management GitHub Enterprise repository
+    ConstraintDescription: Malformed input-parameter GitHub URL. Must be a valid URL (eg. https://github.build.ge.com/sample-organization/sample-repository). Remember to omit '.git' from the end of your repository name.
+  Subnets:
+    Type: CommaDelimitedList
+    Description: List of Subnets.
+  SecurityGroupId:
+    Type: String
+    Description: The id of the security group
+  Template:
+    Description: CFT file name
+    Type: String
+    Default: template.yaml
+  OMGitRepo:
+    Description: Name of git repository
+    Type: String
+    Default: order-management
+  CodePipelineServiceRoleName:
+    Description: Name of code pipeline service role
+    Type: String
+  CloudFormationServiceRoleName:
+    Description: Name of cloudformation service role
+    Type: String
+  CICDBucketName:
+    Description: Name of CICD bucket
+    Type: String
+
+Conditions:
+  IsCICDSourceBranch: !Not [ !Equals [!Ref 'OMGithubBranchName', '' ] ]
+  ShouldEnableProdApproval: !Equals [ !Ref 'Env', 'p' ]
+Mappings:
+  ComputeMap:
+    Small:
+      ComputeType: BUILD_GENERAL1_SMALL
+    Medium:
+      ComputeType: BUILD_GENERAL1_MEDIUM
+    Large:
+      ComputeType: BUILD_GENERAL1_LARGE
+  ImageMap:
+    al2-x86-3.0:
+      Image: aws/codebuild/amazonlinux2-x86_64-standard:3.0
+    al2-aarch64-2.0:
+      Image: aws/codebuild/amazonlinux2-aarch64-standard:2.0
+    ubuntu3.0:
+      Image: aws/codebuild/standard:3.0
+    ubuntu4.0:
+      Image: aws/codebuild/standard:4.0
+    ubuntu5.0:
+      Image: aws/codebuild/standard:5.0
+
+Resources:
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: 
+      ServiceRole: 
+      EncryptionKey: !Ref AppKms
+      SourceVersion:
+        !If
+              - IsCICDSourceBranch
+              - !Ref OMGithubBranchName
+              - !Ref "AWS::NoValue"
+      Source:
+        Type: GITHUB_ENTERPRISE
+        Location: !Ref OMGithubURL
+        GitCloneDepth: 1
+        ReportBuildStatus: true
+        BuildSpec: !Join ["/", [cicd-pipeline, !Sub 'buildspec.yaml']]
+      Artifacts:
+        Type: NO_ARTIFACTS
+      VpcConfig:
+        SecurityGroupIds: [!Ref SecurityGroupId]
+        Subnets: !Ref Subnets
+        VpcId: !Ref BuildVPC
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: !FindInMap [ComputeMap, !Ref BuildComputeSize, ComputeType]
+        Image: !FindInMap [ImageMap, !Ref BuildImage, Image]
+        EnvironmentVariables:
+          - Name: CICD_BUCKET
+            Type: PLAINTEXT
+            Value: !Sub "${OrganizationName}-${ApplicationName}-cicd-${Env}"
+          - Name: UAI
+            Type: PLAINTEXT
+            Value: !Ref UAI
+          - Name: TEMPLATE
+            Type: PLAINTEXT
+            Value: !Ref Template
+          - Name: GIT_REPO
+            Type: PLAINTEXT
+            Value: !Ref OMGitRepo
+          - Name: APP_PREFIX
+            Type: PLAINTEXT
+            Value: !Sub "${OrganizationName}-${ApplicationName}"
+          - Name: ENVIRONMENT
+            Type: PLAINTEXT
+            Value: !Ref Env
+          - Name: ACCT_ID
+            Type: PLAINTEXT
+            Value: !Ref AWS::AccountId
+          - Name: ROLE
+            Type: PLAINTEXT
+            Value: !Ref CloudFormationServiceRoleName
+          - Name: ORGANIZATION_NAME
+            Type: PLAINTEXT
+            Value: !Sub "${OrganizationName}"
+          - Name: APPLICATION_NAME
+            Type: PLAINTEXT
+            Value: !Sub "${ApplicationName}"
+      TimeoutInMinutes: !Ref BuildTimeoutInMinutes
+      Tags:
+        - Key: "Name"
+          Value: !Sub "${OrganizationName}-${ApplicationName}-codebuild-${OMGitRepo}-${Env}"
+        - Key: "owner"
+          Value: !Sub "${OrganizationName}-${ApplicationName}"
+        - Key: "Env"
+          Value: !Sub "${Env}"
+        - Key: "UAI"
+          Value: !Sub "${UAI}"
+  OMCICDPipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Sub "${OrganizationName}-${ApplicationName}-${OMGitRepo}-pipeline-${Env}"
+      ArtifactStore:
+        Type: S3
+        Location: !Sub "${OrganizationName}-${ApplicationName}-${CICDBucketName}-${Env}"
+        EncryptionKey:
+          Id: !Ref AppKms
+          Type: KMS
+      RoleArn: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${OrganizationName}-${ApplicationName}-${CodePipelineServiceRoleName}"
+      Tags:
+        - Key: "Name"
+          Value: !Sub "${OrganizationName}-${ApplicationName}-codepipeline-${OMGitRepo}-${Env}"
+        - Key: "owner"
+          Value: !Sub "${OrganizationName}-${ApplicationName}"
+        - Key: "Env"
+          Value: !Sub "${Env}"
+        - Key: "UAI"
+          Value: !Sub "${UAI}"
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: Source
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Version: 1
+                Provider: S3
+              Configuration:
+                S3Bucket: !Sub "${OrganizationName}-${ApplicationName}-${CICDBucketName}-${Env}"
+                S3ObjectKey: !Sub "${OrganizationName}-${ApplicationName}-${OMGitRepo}/${Env}/template.zip"
+              OutputArtifacts:
+                - Name: appsource
+              RunOrder: 1
+        - Name: CreateChangeSet
+          Actions:
+            - Name: Create-Change-Set
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Version: '1'
+                Provider: CloudFormation
+              Configuration:
+                ActionMode: CHANGE_SET_REPLACE
+                StackName: !Sub "${OrganizationName}-${ApplicationName}-${OMGitRepo}-${Env}"
+                ChangeSetName: !Sub "${OrganizationName}-${ApplicationName}-${OMGitRepo}-${Env}-changeset"
+                TemplatePath: !Sub "appsource::${OMGitRepo}.yaml"
+                TemplateConfiguration: !Sub "appsource::template_configs_${Env}.json"
+                RoleArn: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${OrganizationName}-${ApplicationName}-${CloudFormationServiceRoleName}"
+              InputArtifacts:
+                - Name: appsource
+              RunOrder: 1
+        - !If
+          - ShouldEnableProdApproval
+          - Name: Deploy
+            Actions:
+              - Name: Approve-Change-Set
+                ActionTypeId:
+                  Category: Approval
+                  Owner: AWS
+                  Provider: Manual
+                  Version: '1'
+                RunOrder: 1
+              - Name: Execute-Change-Set
+                ActionTypeId:
+                  Category: Deploy
+                  Owner: AWS
+                  Version: '1'
+                  Provider: CloudFormation
+                Configuration:
+                  ActionMode: CHANGE_SET_EXECUTE
+                  StackName: !Sub "${OrganizationName}-${ApplicationName}-${OMGitRepo}-${Env}"
+                  ChangeSetName: !Sub "${OrganizationName}-${ApplicationName}-${OMGitRepo}-${Env}-changeset"
+                  RoleArn: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${OrganizationName}-${ApplicationName}-${CloudFormationServiceRoleName}"
+                InputArtifacts:
+                  - Name: appsource
+                RunOrder: 2
+          - Name: Deploy
+            Actions:
+              - Name: Execute-Change-Set
+                ActionTypeId:
+                  Category: Deploy
+                  Owner: AWS
+                  Version: '1'
+                  Provider: CloudFormation
+                Configuration:
+                  ActionMode: CHANGE_SET_EXECUTE
+                  StackName: !Sub "${OrganizationName}-${ApplicationName}-${OMGitRepo}-${Env}"
+                  ChangeSetName: !Sub "${OrganizationName}-${ApplicationName}-${OMGitRepo}-${Env}-changeset"
+                  RoleArn: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${OrganizationName}-${ApplicationName}-${CloudFormationServiceRoleName}"
+                InputArtifacts:
+                  - Name: appsource
+                RunOrder: 1
